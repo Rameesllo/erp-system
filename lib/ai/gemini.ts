@@ -259,62 +259,96 @@ export interface ChatHistoryMessage {
   content: string;
 }
 
+const GEMINI_MODELS = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-flash-latest",
+  "gemini-pro-latest",
+];
+
 /**
- * Executes request via Google Gemini with Function Calling.
+ * Executes request via Google Gemini with Function Calling and fallback models.
  */
 async function processWithGemini(
   apiKey: string,
   params: { message: string; history?: ChatHistoryMessage[]; user: AuthUser }
 ): Promise<{ response: string; toolsUsed: string[] }> {
   const genAI = new GoogleGenerativeAI(apiKey);
-
-  const model = genAI.getGenerativeModel({
-    model: "gemini-1.5-flash",
-    systemInstruction: ERP_SYSTEM_PROMPT,
-    tools: [{ functionDeclarations: geminiToolDeclarations }],
-  });
-
   const toolsUsed: string[] = [];
 
-  const pastTurns = (params.history || []).slice(-8).map((h) => ({
-    role: h.role === "assistant" ? "model" : "user",
-    parts: [{ text: h.content }],
-  }));
+  let lastError: any = null;
 
-  const chat = model.startChat({
-    history: pastTurns,
-  });
-
-  let response = await chat.sendMessage(params.message);
-  let functionCalls = response.response.functionCalls();
-
-  let loopCount = 0;
-  while (functionCalls && functionCalls.length > 0 && loopCount < 5) {
-    loopCount++;
-    const functionResponses = [];
-
-    for (const call of functionCalls) {
-      if (!toolsUsed.includes(call.name)) {
-        toolsUsed.push(call.name);
-      }
-      const toolResult = await executeTool(call.name, call.args, { user: params.user });
-      functionResponses.push({
-        functionResponse: {
-          name: call.name,
-          response: toolResult,
-        },
+  for (const modelName of GEMINI_MODELS) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: ERP_SYSTEM_PROMPT,
+        tools: [{ functionDeclarations: geminiToolDeclarations }],
       });
-    }
 
-    response = await chat.sendMessage(functionResponses);
-    functionCalls = response.response.functionCalls();
+      const contents: any[] = [
+        ...(params.history || []).slice(-8).map((h) => ({
+          role: h.role === "assistant" ? "model" : "user",
+          parts: [{ text: h.content }],
+        })),
+        { role: "user", parts: [{ text: params.message }] },
+      ];
+
+      let loopCount = 0;
+      while (loopCount < 5) {
+        loopCount++;
+        const result = await model.generateContent({ contents });
+        const response = result.response;
+        const candidates = response.candidates;
+        const candidate = candidates?.[0];
+        const functionCalls = response.functionCalls();
+
+        if (!functionCalls || functionCalls.length === 0) {
+          return {
+            response: response.text() || "I couldn't find enough data in the ERP to answer that accurately.",
+            toolsUsed,
+          };
+        }
+
+        // Append model response with functionCalls to conversation contents
+        if (candidate?.content) {
+          contents.push(candidate.content);
+        }
+
+        // Execute functions and append response parts
+        const functionResponseParts: any[] = [];
+        for (const call of functionCalls) {
+          if (!toolsUsed.includes(call.name)) {
+            toolsUsed.push(call.name);
+          }
+          const toolResult = await executeTool(call.name, call.args, { user: params.user });
+          functionResponseParts.push({
+            functionResponse: {
+              name: call.name,
+              response: toolResult,
+            },
+          });
+        }
+
+        contents.push({
+          role: "user",
+          parts: functionResponseParts,
+        });
+      }
+
+      return {
+        response: "I couldn't find enough data in the ERP to answer that accurately.",
+        toolsUsed,
+      };
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`Model ${modelName} failed, trying next candidate:`, err?.message || err);
+      // If 503 or 404 or 400, try next model
+      continue;
+    }
   }
 
-  const finalAnswer = response.response.text();
-  return {
-    response: finalAnswer || "I couldn't find enough data in the ERP to answer that accurately.",
-    toolsUsed,
-  };
+  throw lastError || new Error("All Gemini model candidates failed.");
 }
 
 /**
@@ -385,7 +419,7 @@ async function processWithOpenAI(
 
 /**
  * Main AI Dispatcher with Automatic Fallback & Failover:
- * 1. Tries Gemini (Fast + Best Malayalam).
+ * 1. Tries Gemini (Fast + Best Malayalam) across model variants.
  * 2. If Gemini is rate-limited (429) or fails, shifts seamlessly to OpenAI.
  * 3. If only OpenAI key is configured, uses OpenAI directly.
  */
