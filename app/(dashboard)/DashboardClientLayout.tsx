@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { CommandPalette } from "@/components/CommandPalette";
 import { NotificationDropdown } from "@/components/NotificationDropdown";
+import { AIAssistant } from "@/components/AIAssistant";
 import { useAuth } from "@/contexts/AuthContext";
 
 export function DashboardClientLayout({ children }: { children: React.ReactNode }) {
@@ -161,6 +162,7 @@ export function DashboardClientLayout({ children }: { children: React.ReactNode 
       </div>
 
       <CommandPalette isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
+      <AIAssistant />
     </div>
   );
 }

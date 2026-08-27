@@ -29,9 +29,27 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // All other routes require authentication
   const token = request.cookies.get("erp_session")?.value;
+  const authHeader = request.headers.get("authorization");
 
+  // Handle API route authorization (return JSON 401 instead of redirect)
+  if (pathname.startsWith("/api/")) {
+    if (authHeader?.startsWith("Bearer ")) {
+      return NextResponse.next();
+    }
+    if (!token) {
+      return NextResponse.json({ success: false, message: "Unauthorized" }, { status: 401 });
+    }
+    try {
+      const secret = new TextEncoder().encode(process.env.JWT_SECRET || "");
+      await jwtVerify(token, secret);
+      return NextResponse.next();
+    } catch {
+      return NextResponse.json({ success: false, message: "Unauthorized" }, { status: 401 });
+    }
+  }
+
+  // Handle Page route authorization (redirect to /login)
   if (!token) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("from", pathname);
