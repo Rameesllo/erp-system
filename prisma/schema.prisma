@@ -1,0 +1,209 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id          String    @id @default(cuid())
+  name        String
+  email       String    @unique
+  password    String
+  role        String    @default("STAFF")
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  notifications Notification[]
+}
+
+model Notification {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  description String
+  type        String   @default("INFO") // INFO, SUCCESS, WARNING, ERROR
+  read        Boolean  @default(false)
+  link        String?
+  createdAt   DateTime @default(now())
+}
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?
+  isActive    Boolean   @default(true)
+  products    Product[]
+  createdAt   DateTime  @default(now())
+}
+
+model Product {
+  id          String  @id @default(cuid())
+  name        String
+  sku         String  @unique
+  description String?
+  price       Float
+  costPrice   Float?
+  stock       Int     @default(0)
+  minStock    Int     @default(0)
+  isActive    Boolean @default(true)
+  imageUrl    String?
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  stockMovements StockMovement[]
+  purchaseItems  PurchaseItem[]
+  orderItems     OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model StockMovement {
+  id String @id @default(cuid())
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  type          String
+  quantity      Int
+  previousStock Int @default(0)
+  newStock      Int @default(0)
+  reason        String?
+  reference     String?
+  notes         String?
+
+  createdAt DateTime @default(now())
+}
+
+model Customer {
+  id      String  @id @default(cuid())
+  name    String
+  email   String? @unique
+  phone   String?
+  address String?
+
+  orders Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Supplier {
+  id      String  @id @default(cuid())
+  name    String
+  email   String? @unique
+  phone   String?
+  address String?
+  company String?
+
+  purchases Purchase[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Purchase {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  totalAmount Float
+  status      String @default("PENDING")
+
+  items PurchaseItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PurchaseItem {
+  id String @id @default(cuid())
+
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity  Int
+  unitPrice Float
+  total     Float
+}
+
+model Order {
+  id String @id @default(cuid())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  totalAmount Float
+  status      String @default("PENDING")
+
+  items    OrderItem[]
+  payments Payment[]
+  invoice  Invoice?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model OrderItem {
+  id String @id @default(cuid())
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id])
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity  Int
+  unitPrice Float
+  total     Float
+}
+
+model Payment {
+  id String @id @default(cuid())
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id])
+
+  amount Float
+  method String
+  status String @default("PENDING")
+
+  transactionId String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Invoice {
+  id String @id @default(cuid())
+
+  invoiceNo String @unique
+
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id])
+
+  subtotal Float
+  tax      Float @default(0)
+  discount Float @default(0)
+  total    Float
+
+  status String @default("UNPAID")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
