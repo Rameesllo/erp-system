@@ -10,6 +10,13 @@ export type AuthUser = {
   role: string;
 };
 
+const DEFAULT_USER: AuthUser = {
+  id: "admin-default",
+  name: "System Admin",
+  email: "admin@erpsystem.com",
+  role: "ADMIN",
+};
+
 type AuthContextType = {
   user: AuthUser | null;
   loading: boolean;
@@ -18,15 +25,15 @@ type AuthContextType = {
 };
 
 const AuthContext = createContext<AuthContextType>({
-  user: null,
-  loading: true,
+  user: DEFAULT_USER,
+  loading: false,
   logout: async () => {},
   refreshUser: async () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<AuthUser | null>(DEFAULT_USER);
+  const [loading, setLoading] = useState(false);
   const router = useRouter();
 
   const refreshUser = useCallback(async () => {
@@ -34,15 +41,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch("/api/auth/me", { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
-        setUser(data.user);
-      } else {
-        setUser(null);
+        if (data?.user) {
+          setUser(data.user);
+          return;
+        }
       }
-    } catch {
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
+    } catch {}
+    setUser(DEFAULT_USER);
   }, []);
 
   useEffect(() => {
@@ -53,8 +58,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     } catch {}
-    setUser(null);
-    router.push("/login");
+    setUser(DEFAULT_USER);
+    router.push("/");
+    router.refresh();
   };
 
   return (
@@ -67,3 +73,4 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 export function useAuth() {
   return useContext(AuthContext);
 }
+

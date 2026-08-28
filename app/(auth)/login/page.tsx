@@ -51,7 +51,7 @@ export default function LoginPage() {
             <LayoutDashboard size={28} className="text-white" />
           </div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Welcome back</h1>
-          <p className="text-slate-400 text-sm">Sign in to your NexusERP workspace</p>
+          <p className="text-slate-400 text-sm">Sign in to your LLO ERP workspace</p>
         </div>
 
         {/* Error */}
@@ -126,7 +126,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="text-center text-xs text-slate-600">
-          NexusERP &copy; {new Date().getFullYear()} — Secure workspace access
+          LLO ERP &copy; {new Date().getFullYear()} — Secure workspace access
         </p>
       </div>
     </div>

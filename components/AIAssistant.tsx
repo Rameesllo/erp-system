@@ -123,7 +123,7 @@ export function AIAssistant() {
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
-  const [voiceLang, setVoiceLang] = useState<"en-IN" | "ml-IN">("en-IN");
+  const [voiceLang, setVoiceLang] = useState<"en-IN" | "ml-IN">("ml-IN");
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [autoVoiceOver, setAutoVoiceOver] = useState(true); // 🔊 Auto Voice Over ON by default!
 
@@ -136,6 +136,26 @@ export function AIAssistant() {
   const isCallModeRef = useRef(false);
   const isMutedRef = useRef(false);
   const isProcessingRef = useRef(false);
+  const voiceLangRef = useRef<"en-IN" | "ml-IN">("ml-IN");
+
+  // Load language preference
+  useEffect(() => {
+    try {
+      const savedLang = localStorage.getItem("erp_voice_lang");
+      if (savedLang === "en-IN" || savedLang === "ml-IN") {
+        setVoiceLang(savedLang);
+        voiceLangRef.current = savedLang;
+      }
+    } catch {}
+  }, []);
+
+  const changeVoiceLang = (lang: "en-IN" | "ml-IN") => {
+    setVoiceLang(lang);
+    voiceLangRef.current = lang;
+    try {
+      localStorage.setItem("erp_voice_lang", lang);
+    } catch {}
+  };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -150,6 +170,10 @@ export function AIAssistant() {
   useEffect(() => {
     isMutedRef.current = isMuted;
   }, [isMuted]);
+
+  useEffect(() => {
+    voiceLangRef.current = voiceLang;
+  }, [voiceLang]);
 
   // Call timer
   useEffect(() => {
@@ -387,10 +411,18 @@ export function AIAssistant() {
   const startListening = (fromCallMode = false) => {
     if (typeof window === "undefined") return;
 
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    // Check secure context for mobile devices
+    if (window.isSecureContext === false && window.location.hostname !== "localhost") {
+      alert(
+        "Mobile browsers require HTTPS or localhost for microphone access. If accessing over Wi-Fi (e.g. 192.168.x.x), please open via HTTPS or configure a secure tunnel."
+      );
+    }
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      alert("Voice recognition is not supported in this browser. Please use Chrome, Edge, or Safari.");
+      alert("Voice recognition is not supported in this browser. Please use Chrome, Edge, or Safari on your mobile device.");
       return;
     }
 
@@ -398,9 +430,11 @@ export function AIAssistant() {
 
     try {
       const recognition = new SpeechRecognition();
-      recognition.continuous = false; // Capture per utterance for snappy real-time calling
+      // On mobile browsers, continuous=true prevents premature cutoffs while speaking Malayalam
+      recognition.continuous = !fromCallMode;
       recognition.interimResults = true;
-      recognition.lang = voiceLang;
+      recognition.maxAlternatives = 1;
+      recognition.lang = voiceLang === "ml-IN" ? "ml-IN" : "en-IN";
 
       recognition.onstart = () => {
         setIsListening(true);
@@ -409,19 +443,29 @@ export function AIAssistant() {
       };
 
       recognition.onresult = (event: any) => {
-        const transcript = Array.from(event.results)
-          .map((result: any) => result[0].transcript)
-          .join("");
-
-        setInput(transcript);
-        setCallLiveSubtitle(transcript);
+        let finalStr = "";
+        let interimStr = "";
+        for (let i = 0; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            finalStr += event.results[i][0].transcript + " ";
+          } else {
+            interimStr += event.results[i][0].transcript;
+          }
+        }
+        const fullTranscript = (finalStr + interimStr).trim();
+        if (fullTranscript) {
+          setInput(fullTranscript);
+          setCallLiveSubtitle(fullTranscript);
+        }
       };
 
       recognition.onerror = (event: any) => {
         console.warn("Speech recognition error:", event.error);
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          alert("Microphone permission was denied. Please allow microphone access in your mobile browser settings.");
+        }
         setIsListening(false);
         if (fromCallMode && isCallModeRef.current && !isMutedRef.current && !isProcessingRef.current) {
-          // Retry listening if in call mode on transient silence error
           setTimeout(() => {
             if (isCallModeRef.current && !isSpeaking && !isProcessingRef.current) {
               startListening(true);
@@ -434,13 +478,12 @@ export function AIAssistant() {
         setIsListening(false);
 
         // 📞 TELEPHONY AUTO-SUBMIT:
-        // In call mode, as soon as the user finishes speaking their phrase, automatically dispatch!
+        // In call mode, as soon as the user finishes speaking, automatically dispatch!
         if (fromCallMode && isCallModeRef.current && !isProcessingRef.current) {
           const currentText = inputRef.current?.value || "";
           if (currentText.trim()) {
             handleSendMessage(currentText.trim(), true);
           } else {
-            // Keep listening if user didn't speak anything yet
             setTimeout(() => {
               if (isCallModeRef.current && !isSpeaking && !isProcessingRef.current) {
                 startListening(true);
@@ -462,7 +505,7 @@ export function AIAssistant() {
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
-      } catch { }
+      } catch {}
       recognitionRef.current = null;
     }
     setIsListening(false);
@@ -634,7 +677,7 @@ export function AIAssistant() {
             <button
               onClick={() => {
                 const next = voiceLang === "en-IN" ? "ml-IN" : "en-IN";
-                setVoiceLang(next);
+                changeVoiceLang(next);
                 if (isListening) {
                   stopListening();
                   setTimeout(() => startListening(true), 200);
@@ -651,7 +694,7 @@ export function AIAssistant() {
           <div className="flex-1 flex flex-col items-center justify-center text-center max-w-lg w-full mx-auto my-auto space-y-8">
             <div>
               <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-gradient-to-r from-white via-indigo-100 to-slate-300 bg-clip-text text-transparent">
-                NexusERP AI Voice
+                LLO AI Voice
               </h2>
               <p className="text-xs sm:text-sm text-indigo-300/80 mt-1 font-medium">
                 {callStateText === "listening" && "🎙️ Listening... Speak your query"}
@@ -1017,10 +1060,11 @@ export function AIAssistant() {
               <span className="text-slate-400 flex-shrink-0">Mic:</span>
               <button
                 type="button"
-                onClick={() => setVoiceLang(voiceLang === "en-IN" ? "ml-IN" : "en-IN")}
-                className="px-2 py-0.5 bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-700 font-semibold rounded text-[10px] transition-colors border border-slate-200/60 truncate"
+                onClick={() => changeVoiceLang(voiceLang === "en-IN" ? "ml-IN" : "en-IN")}
+                className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold rounded text-[11px] transition-colors border border-indigo-200/60 truncate flex items-center gap-1 shadow-sm"
               >
-                {voiceLang === "en-IN" ? "🇮🇳 English" : "🇮🇳 മലയാളം"}
+                <Globe size={11} className="text-indigo-600" />
+                <span>{voiceLang === "en-IN" ? "EN (English)" : "മലയാളം (Malayalam)"}</span>
               </button>
             </div>
             
