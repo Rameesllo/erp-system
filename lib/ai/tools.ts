@@ -12,16 +12,41 @@ function parseDateRange(period?: string, startDate?: string, endDate?: string): 
   }
   if (period) {
     const start = new Date();
-    switch (period.toLowerCase()) {
+    const cleanPeriod = period.toLowerCase().trim();
+
+    switch (cleanPeriod) {
       case "today":
+      case "innu":
+      case "innathe":
+      case "ഇന്ന്":
+      case "ഇന്നത്തെ":
         start.setHours(0, 0, 0, 0);
         return { gte: start, lte: now };
+
+      case "yesterday":
+      case "innale":
+      case "ഇന്നലെ": {
+        const yStart = new Date();
+        yStart.setDate(now.getDate() - 1);
+        yStart.setHours(0, 0, 0, 0);
+        const yEnd = new Date();
+        yEnd.setDate(now.getDate() - 1);
+        yEnd.setHours(23, 59, 59, 999);
+        return { gte: yStart, lte: yEnd };
+      }
+
       case "week":
       case "this_week":
+      case "ee_week":
+      case "ee_aazhcha":
+      case "ഈ ആഴ്ച":
         start.setDate(now.getDate() - now.getDay());
         start.setHours(0, 0, 0, 0);
         return { gte: start, lte: now };
-      case "last_week": {
+
+      case "last_week":
+      case "kazhinja_aazhcha":
+      case "കഴിഞ്ഞ ആഴ്ച": {
         const lastWeekEnd = new Date();
         lastWeekEnd.setDate(now.getDate() - now.getDay());
         lastWeekEnd.setHours(0, 0, 0, 0);
@@ -29,24 +54,55 @@ function parseDateRange(period?: string, startDate?: string, endDate?: string): 
         lastWeekStart.setDate(lastWeekStart.getDate() - 7);
         return { gte: lastWeekStart, lte: lastWeekEnd };
       }
+
+      case "past_30_days":
+      case "last_30_days": {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        return { gte: thirtyDaysAgo, lte: now };
+      }
+
       case "month":
       case "this_month":
       case "current_month":
+      case "ee_masam":
+      case "ee_masathe":
+      case "ഈ മാസം":
+      case "ഈ മാസത്തെ":
         start.setDate(1);
         start.setHours(0, 0, 0, 0);
         return { gte: start, lte: now };
-      case "last_month": {
+
+      case "last_month":
+      case "kazhinja_masam":
+      case "kazhinja_masathe":
+      case "കഴിഞ്ഞ മാസം":
+      case "കഴിഞ്ഞ മാസത്തെ": {
         const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
         const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
         return { gte: lastMonthStart, lte: lastMonthEnd };
       }
+
       case "year":
       case "this_year":
+      case "ee_varsham":
+      case "ഈ വർഷം":
         start.setMonth(0, 1);
         start.setHours(0, 0, 0, 0);
         return { gte: start, lte: now };
+
+      case "last_year":
+      case "kazhinja_varsham":
+      case "കഴിഞ്ഞ വർഷം": {
+        const lastYearStart = new Date(now.getFullYear() - 1, 0, 1);
+        const lastYearEnd = new Date(now.getFullYear() - 1, 11, 31, 23, 59, 59, 999);
+        return { gte: lastYearStart, lte: lastYearEnd };
+      }
+
+      case "all_time":
+        return {};
     }
   }
+
   // Default to current month if unspecified
   const defaultStart = new Date();
   defaultStart.setDate(1);
@@ -304,7 +360,6 @@ export async function getCustomerInsights(
   const totalCustomerCount = await prisma.customer.count();
 
   if (type === "inactive") {
-    // Customers with no orders in the last 60 days
     const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
     const inactiveCustomers = await prisma.customer.findMany({
       where: {
@@ -337,7 +392,6 @@ export async function getCustomerInsights(
     };
   }
 
-  // Top spending customers
   const customers = await prisma.customer.findMany({
     include: {
       orders: {
@@ -524,6 +578,137 @@ export async function getInventoryInsights(params: {}, ctx: ToolContext) {
 }
 
 /**
+ * 10. searchEntity (Fuzzy Search for Products, Customers, Suppliers)
+ */
+export async function searchEntity(
+  params: { query: string; entityType?: "product" | "customer" | "supplier" | "all" },
+  ctx: ToolContext
+) {
+  const q = (params.query || "").trim();
+  if (!q) return { matches: [], message: "Empty query" };
+
+  const entityType = params.entityType || "all";
+  const results: any = {};
+
+  if (entityType === "product" || entityType === "all") {
+    results.products = await prisma.product.findMany({
+      where: {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { sku: { contains: q, mode: "insensitive" } },
+          { description: { contains: q, mode: "insensitive" } },
+        ],
+      },
+      take: 5,
+      select: { id: true, name: true, sku: true, stock: true, minStock: true, price: true },
+    });
+  }
+
+  if (entityType === "customer" || entityType === "all") {
+    results.customers = await prisma.customer.findMany({
+      where: {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { email: { contains: q, mode: "insensitive" } },
+          { phone: { contains: q, mode: "insensitive" } },
+        ],
+      },
+      take: 5,
+      select: { id: true, name: true, email: true, phone: true },
+    });
+  }
+
+  if ((entityType === "supplier" || entityType === "all") && requireRole(ctx.user, ["ADMIN", "MANAGER"])) {
+    results.suppliers = await prisma.supplier.findMany({
+      where: {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { company: { contains: q, mode: "insensitive" } },
+          { email: { contains: q, mode: "insensitive" } },
+        ],
+      },
+      take: 5,
+      select: { id: true, name: true, company: true, email: true },
+    });
+  }
+
+  return {
+    searchedTerm: q,
+    ...results,
+  };
+}
+
+/**
+ * 11. Navigate to ERP Page / Screen Tool
+ * Allows the AI to assist users in navigating to any screen in the system.
+ */
+export async function navigateToPage(args: { target: string }, ctx: ToolContext): Promise<any> {
+  const target = (args.target || "").toLowerCase().trim().replace(/[\s\-_]+/g, "");
+
+  const ROUTE_MAP: Record<string, { path: string; title: string; description: string; roleRequired?: string[] }> = {
+    profile: { path: "/settings/profile", title: "Profile Settings", description: "Personal profile and account settings" },
+    myprofile: { path: "/settings/profile", title: "Profile Settings", description: "Personal profile and account settings" },
+    settings: { path: "/settings/profile", title: "Settings", description: "Personal profile and system settings" },
+    users: { path: "/settings/users", title: "User Management", description: "Manage team members and user roles", roleRequired: ["ADMIN"] },
+    usermanagement: { path: "/settings/users", title: "User Management", description: "Manage team members and user roles", roleRequired: ["ADMIN"] },
+    inventory: { path: "/inventory", title: "Inventory Overview", description: "Track stock counts, valuations, and low-stock alerts" },
+    products: { path: "/inventory/products", title: "Products Catalog", description: "Manage items, prices, SKUs, and stock quantities" },
+    items: { path: "/inventory/products", title: "Products Catalog", description: "Manage items, prices, SKUs, and stock quantities" },
+    categories: { path: "/inventory/categories", title: "Product Categories", description: "Manage product groupings and categories" },
+    stockmovements: { path: "/stock-movements", title: "Stock Movements", description: "Audit stock in/out adjustments and history" },
+    stock: { path: "/inventory", title: "Inventory Overview", description: "Track stock counts and inventory" },
+    sales: { path: "/sales", title: "Sales Orders", description: "Manage customer orders, statuses, and delivery" },
+    orders: { path: "/sales", title: "Sales Orders", description: "Manage customer orders, statuses, and delivery" },
+    customers: { path: "/crm", title: "CRM & Customers", description: "View customer directory, contacts, and purchase histories" },
+    crm: { path: "/crm", title: "CRM & Customers", description: "View customer directory, contacts, and purchase histories" },
+    purchases: { path: "/procurement/purchases", title: "Purchase Orders", description: "Manage vendor purchase orders and procurement", roleRequired: ["ADMIN", "MANAGER"] },
+    purchaseorders: { path: "/procurement/purchases", title: "Purchase Orders", description: "Manage vendor purchase orders and procurement", roleRequired: ["ADMIN", "MANAGER"] },
+    procurement: { path: "/procurement/purchases", title: "Purchase Orders", description: "Manage vendor purchase orders and procurement", roleRequired: ["ADMIN", "MANAGER"] },
+    suppliers: { path: "/procurement/suppliers", title: "Suppliers Directory", description: "Manage supplier vendors and contacts", roleRequired: ["ADMIN", "MANAGER"] },
+    vendors: { path: "/procurement/suppliers", title: "Suppliers Directory", description: "Manage supplier vendors and contacts", roleRequired: ["ADMIN", "MANAGER"] },
+    invoices: { path: "/finance/invoices", title: "Billing & Invoices", description: "Track customer invoices, dues, and payments", roleRequired: ["ADMIN", "MANAGER"] },
+    finance: { path: "/finance/invoices", title: "Billing & Invoices", description: "Track customer invoices, dues, and payments", roleRequired: ["ADMIN", "MANAGER"] },
+    billing: { path: "/finance/invoices", title: "Billing & Invoices", description: "Track customer invoices, dues, and payments", roleRequired: ["ADMIN", "MANAGER"] },
+    payments: { path: "/finance/payments", title: "Payment Records", description: "View received payments and transactions", roleRequired: ["ADMIN", "MANAGER"] },
+    dashboard: { path: "/", title: "Dashboard Overview", description: "High-level ERP metrics and analytics overview" },
+    overview: { path: "/", title: "Dashboard Overview", description: "High-level ERP metrics and analytics overview" },
+    home: { path: "/", title: "Dashboard Overview", description: "High-level ERP metrics and analytics overview" },
+  };
+
+  let matched = ROUTE_MAP[target];
+  if (!matched) {
+    for (const key of Object.keys(ROUTE_MAP)) {
+      if (target.includes(key) || key.includes(target)) {
+        matched = ROUTE_MAP[key];
+        break;
+      }
+    }
+  }
+
+  if (!matched) {
+    return {
+      success: false,
+      error: `Could not find a page matching "${args.target}". Available destinations: Profile, Settings, Users, Inventory, Products, Categories, Stock Movements, Sales Orders, CRM Customers, Suppliers, Invoices, Payments, Dashboard.`,
+    };
+  }
+
+  if (matched.roleRequired && !requireRole(ctx.user, matched.roleRequired as any)) {
+    return {
+      success: false,
+      error: `Access Denied: The ${matched.title} page requires ${matched.roleRequired.join(" or ")} permissions.`,
+    };
+  }
+
+  return {
+    success: true,
+    action: "NAVIGATE",
+    path: matched.path,
+    pageTitle: matched.title,
+    description: matched.description,
+  };
+}
+
+/**
  * Main Tool Dispatcher
  */
 export async function executeTool(name: string, args: any, ctx: ToolContext): Promise<any> {
@@ -547,6 +732,10 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
         return await getInvoiceSummary(args || {}, ctx);
       case "getInventoryInsights":
         return await getInventoryInsights(args || {}, ctx);
+      case "searchEntity":
+        return await searchEntity(args || {}, ctx);
+      case "navigateToPage":
+        return await navigateToPage(args || {}, ctx);
       default:
         return { error: `Unknown tool: ${name}` };
     }
@@ -555,3 +744,4 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
     return { error: error?.message || "Tool execution failed" };
   }
 }
+

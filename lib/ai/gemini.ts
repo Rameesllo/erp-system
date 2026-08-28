@@ -128,6 +128,38 @@ export const geminiToolDeclarations: FunctionDeclaration[] = [
       properties: {},
     },
   },
+  {
+    name: "searchEntity",
+    description: "Fuzzy search for specific products, customers, or suppliers by keyword/name to answer specific entity inquiries.",
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        query: {
+          type: SchemaType.STRING,
+          description: "Search keyword or name (e.g. 'wireless mouse', 'iphone', 'john').",
+        },
+        entityType: {
+          type: SchemaType.STRING,
+          description: "Optional filter: 'product', 'customer', 'supplier', or 'all'.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "navigateToPage",
+    description: "Navigate the user's screen directly to an ERP page/screen (e.g. 'profile', 'inventory', 'products', 'categories', 'stock_movements', 'sales', 'customers', 'suppliers', 'invoices', 'payments', 'users', 'dashboard'). Call this whenever the user asks to open, go to, view, or show a page or screen.",
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        target: {
+          type: SchemaType.STRING,
+          description: "The destination screen name (e.g. 'profile', 'inventory', 'products', 'categories', 'sales', 'customers', 'suppliers', 'invoices', 'payments', 'users', 'dashboard').",
+        },
+      },
+      required: ["target"],
+    },
+  },
 ];
 
 // OpenAI formatted tool definitions
@@ -252,6 +284,35 @@ const openAIToolDeclarations: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       parameters: { type: "object", properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "searchEntity",
+      description: "Fuzzy search for specific products, customers, or suppliers by keyword or name.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search keyword or name." },
+          entityType: { type: "string", enum: ["product", "customer", "supplier", "all"], description: "Entity type." },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "navigateToPage",
+      description: "Navigate the user's screen directly to an ERP page/screen (e.g. 'profile', 'inventory', 'products', 'categories', 'stock_movements', 'sales', 'customers', 'suppliers', 'invoices', 'payments', 'users', 'dashboard'). Call this whenever the user asks to open, go to, view, or show a page or screen.",
+      parameters: {
+        type: "object",
+        properties: {
+          target: { type: "string", description: "Destination page name (e.g. 'profile', 'inventory', 'products', 'categories', 'sales', 'customers', 'suppliers', 'invoices', 'payments', 'users', 'dashboard')." },
+        },
+        required: ["target"],
+      },
+    },
+  },
 ];
 
 export interface ChatHistoryMessage {
@@ -259,12 +320,35 @@ export interface ChatHistoryMessage {
   content: string;
 }
 
+// Real Gemini model names — ordered newest → oldest as fallback chain
 const GEMINI_MODELS = [
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
-  "gemini-flash-latest",
-  "gemini-pro-latest",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-8b",
 ];
+
+/** Returns true when the error is a quota / rate-limit signal */
+function isRateLimitError(err: any): boolean {
+  const msg = String(err?.message || err || "").toLowerCase();
+  const status = err?.status ?? err?.statusCode ?? err?.code;
+  return (
+    status === 429 ||
+    msg.includes("429") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("resourceexhausted") ||
+    msg.includes("quota") ||
+    msg.includes("rate limit") ||
+    msg.includes("rate_limit")
+  );
+}
+
+export interface AssistantAction {
+  type: "NAVIGATE";
+  path: string;
+  pageTitle: string;
+  description?: string;
+}
 
 /**
  * Executes request via Google Gemini with Function Calling and fallback models.
@@ -272,9 +356,10 @@ const GEMINI_MODELS = [
 async function processWithGemini(
   apiKey: string,
   params: { message: string; history?: ChatHistoryMessage[]; user: AuthUser }
-): Promise<{ response: string; toolsUsed: string[] }> {
+): Promise<{ response: string; toolsUsed: string[]; action?: AssistantAction }> {
   const genAI = new GoogleGenerativeAI(apiKey);
   const toolsUsed: string[] = [];
+  let detectedAction: AssistantAction | undefined;
 
   let lastError: any = null;
 
@@ -307,6 +392,7 @@ async function processWithGemini(
           return {
             response: response.text() || "I couldn't find enough data in the ERP to answer that accurately.",
             toolsUsed,
+            action: detectedAction,
           };
         }
 
@@ -322,6 +408,14 @@ async function processWithGemini(
             toolsUsed.push(call.name);
           }
           const toolResult = await executeTool(call.name, call.args, { user: params.user });
+          if (toolResult?.action === "NAVIGATE" && toolResult?.path) {
+            detectedAction = {
+              type: "NAVIGATE",
+              path: toolResult.path,
+              pageTitle: toolResult.pageTitle || "Page",
+              description: toolResult.description,
+            };
+          }
           functionResponseParts.push({
             functionResponse: {
               name: call.name,
@@ -339,12 +433,19 @@ async function processWithGemini(
       return {
         response: "I couldn't find enough data in the ERP to answer that accurately.",
         toolsUsed,
+        action: detectedAction,
       };
     } catch (err: any) {
       lastError = err;
-      console.warn(`Model ${modelName} failed, trying next candidate:`, err?.message || err);
-      // If 503 or 404 or 400, try next model
-      continue;
+
+      // On quota / rate-limit: ALL models share the same quota key, so stop
+      // cycling models immediately and let the caller fall back to OpenAI.
+      if (isRateLimitError(err)) {
+        console.warn("[AI] Gemini quota/rate-limit hit — switching to OpenAI fallback.");
+        throw err;
+      }
+
+      console.warn(`[AI] Gemini model "${modelName}" failed (non-quota), trying next:`, err?.message || err);
     }
   }
 
@@ -352,14 +453,18 @@ async function processWithGemini(
 }
 
 /**
- * Executes request via OpenAI (GPT-4o-mini) as seamless fallback.
+ * Shared OpenAI-compatible chat loop — used by both OpenAI and Groq.
+ * Pass a custom `baseURL` + `model` to target Groq.
  */
-async function processWithOpenAI(
+async function processWithOpenAICompat(
   apiKey: string,
-  params: { message: string; history?: ChatHistoryMessage[]; user: AuthUser }
-): Promise<{ response: string; toolsUsed: string[] }> {
-  const openai = new OpenAI({ apiKey });
+  model: string,
+  params: { message: string; history?: ChatHistoryMessage[]; user: AuthUser },
+  baseURL?: string
+): Promise<{ response: string; toolsUsed: string[]; action?: AssistantAction }> {
+  const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   const toolsUsed: string[] = [];
+  let detectedAction: AssistantAction | undefined;
 
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: ERP_SYSTEM_PROMPT },
@@ -373,8 +478,8 @@ async function processWithOpenAI(
   let loopCount = 0;
   while (loopCount < 5) {
     loopCount++;
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+    const completion = await client.chat.completions.create({
+      model,
       messages,
       tools: openAIToolDeclarations,
       tool_choice: "auto",
@@ -396,6 +501,14 @@ async function processWithOpenAI(
           } catch {}
 
           const result = await executeTool(fnName, fnArgs, { user: params.user });
+          if (result?.action === "NAVIGATE" && result?.path) {
+            detectedAction = {
+              type: "NAVIGATE",
+              path: result.path,
+              pageTitle: result.pageTitle || "Page",
+              description: result.description,
+            };
+          }
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
@@ -407,27 +520,68 @@ async function processWithOpenAI(
       return {
         response: responseMsg.content || "I couldn't find enough data in the ERP to answer that accurately.",
         toolsUsed,
+        action: detectedAction,
       };
     }
   }
 
-  return {
-    response: "Query processing complete.",
-    toolsUsed,
-  };
+  return { response: "Query processing complete.", toolsUsed, action: detectedAction };
+}
+
+/** OpenAI GPT-4o-mini */
+async function processWithOpenAI(
+  apiKey: string,
+  params: { message: string; history?: ChatHistoryMessage[]; user: AuthUser }
+): Promise<{ response: string; toolsUsed: string[]; action?: AssistantAction }> {
+  return processWithOpenAICompat(apiKey, "gpt-4o-mini", params);
+}
+
+const GROQ_MODELS = [
+  "openai/gpt-oss-120b",
+  "openai/gpt-oss-20b",
+  "qwen/qwen3.8-27b",
+];
+
+/**
+ * Groq free-tier fallback — ultra-fast function calling.
+ * Get a free key at https://console.groq.com (14,400 req/day free).
+ * Uses OpenAI-compatible API via baseURL swap.
+ */
+async function processWithGroq(
+  apiKey: string,
+  params: { message: string; history?: ChatHistoryMessage[]; user: AuthUser }
+): Promise<{ response: string; toolsUsed: string[]; action?: AssistantAction }> {
+  let lastErr: any = null;
+  for (const model of GROQ_MODELS) {
+    try {
+      return await processWithOpenAICompat(
+        apiKey,
+        model,
+        params,
+        "https://api.groq.com/openai/v1"
+      );
+    } catch (err: any) {
+      lastErr = err;
+      console.warn(`[AI] Groq model ${model} failed, trying next:`, err?.message || err);
+    }
+  }
+  throw lastErr || new Error("All Groq models failed");
 }
 
 /**
- * Main AI Dispatcher with Automatic Fallback & Failover:
- * 1. Tries Gemini (Fast + Best Malayalam) across model variants.
- * 2. If Gemini is rate-limited (429) or fails, shifts seamlessly to OpenAI.
- * 3. If only OpenAI key is configured, uses OpenAI directly.
+ * Main AI Dispatcher — 3-tier automatic failover:
+ *   1. Google Gemini  (best Malayalam, free tier)
+ *   2. OpenAI GPT-4o-mini  (paid, high quality)
+ *   3. Groq Llama-3.3-70b  (free tier, 14,400 req/day fallback)
+ *
+ * Each tier is tried in order. A quota / rate-limit error causes an
+ * immediate jump to the next tier without wasting retries.
  */
 export async function processAIChatMessage(params: {
   message: string;
   history?: ChatHistoryMessage[];
   user: AuthUser;
-}): Promise<{ response: string; toolsUsed: string[] }> {
+}): Promise<{ response: string; toolsUsed: string[]; provider?: string; action?: AssistantAction }> {
   const geminiKey =
     process.env.GEMINI_API_KEY && !process.env.GEMINI_API_KEY.includes("your-gemini-api-key")
       ? process.env.GEMINI_API_KEY.trim()
@@ -438,60 +592,67 @@ export async function processAIChatMessage(params: {
       ? process.env.OPENAI_API_KEY.trim()
       : "";
 
-  if (!geminiKey && !openAIKey) {
+  const groqKey =
+    process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.includes("your-groq-api-key")
+      ? process.env.GROQ_API_KEY.trim()
+      : "";
+
+  if (!geminiKey && !openAIKey && !groqKey) {
     return {
       response:
-        "⚠️ **AI Assistant Key Missing**: Please add your `GEMINI_API_KEY` or `OPENAI_API_KEY` in `.env` to enable live responses.",
+        "⚠️ **No AI Provider Configured**\n\nAdd at least one key to `.env`:\n" +
+        "- `GEMINI_API_KEY` — free at [aistudio.google.com](https://aistudio.google.com/app/apikey)\n" +
+        "- `GROQ_API_KEY` — **free** at [console.groq.com](https://console.groq.com) (14,400 req/day)\n" +
+        "- `OPENAI_API_KEY` — paid at [platform.openai.com](https://platform.openai.com)",
       toolsUsed: [],
     };
   }
 
-  // 1. Try Gemini first if key is present
+  // ── TIER 1: Google Gemini ────────────────────────────────────────────────
   if (geminiKey) {
     try {
-      return await processWithGemini(geminiKey, params);
-    } catch (geminiError: any) {
-      console.warn("Gemini execution encountered an error, attempting fallback to OpenAI:", geminiError?.message || geminiError);
-
-      // If OpenAI is available, failover immediately
-      if (openAIKey) {
-        try {
-          return await processWithOpenAI(openAIKey, params);
-        } catch (openAIError: any) {
-          console.error("OpenAI fallback also failed:", openAIError);
-        }
-      }
-
-      // If no OpenAI fallback or if OpenAI also failed, return graceful message
-      if (geminiError?.status === 429 || String(geminiError).includes("429") || String(geminiError).includes("ResourceExhausted")) {
-        return {
-          response: "⚠️ **Rate Limit Reached**: Gemini request quota exceeded. Please add an `OPENAI_API_KEY` to `.env` as an automatic backup or try again in a minute.",
-          toolsUsed: [],
-        };
-      }
-
-      return {
-        response: `I'm unable to process this request right now (${geminiError?.message || "AI service error"}). Please try again.`,
-        toolsUsed: [],
-      };
+      const result = await processWithGemini(geminiKey, params);
+      return { ...result, provider: "gemini" };
+    } catch (err: any) {
+      console.warn("[AI] Gemini failed:", err?.message || err);
+      // fall through to next tier
     }
   }
 
-  // 2. Direct OpenAI if only OpenAI is configured
+  // ── TIER 2: OpenAI GPT-4o-mini ──────────────────────────────────────────
   if (openAIKey) {
     try {
-      return await processWithOpenAI(openAIKey, params);
+      const result = await processWithOpenAI(openAIKey, params);
+      return { ...result, provider: "openai" };
     } catch (err: any) {
-      console.error("OpenAI execution error:", err);
+      console.warn("[AI] OpenAI failed:", err?.message || err);
+      // fall through to next tier
+    }
+  }
+
+  // ── TIER 3: Groq Llama/Qwen/GPT-OSS (free) ──────────────────────────────
+  if (groqKey) {
+    try {
+      const result = await processWithGroq(groqKey, params);
+      return { ...result, provider: "groq" };
+    } catch (err: any) {
+      console.error("[AI] Groq fallback also failed:", err?.message || err);
       return {
-        response: `OpenAI error: ${err?.message || "Something went wrong"}.`,
+        response:
+          "⚠️ **All AI providers are currently unavailable.**\n\n" +
+          "- Gemini & OpenAI quotas may be exhausted.\n" +
+          "- Groq also returned an error.\n\n" +
+          "Please check your API keys or try again in a few minutes.",
         toolsUsed: [],
       };
     }
   }
 
+  // All configured providers failed
   return {
-    response: "No active AI provider configured.",
+    response:
+      "⚠️ **All configured AI providers failed.**\n\n" +
+      "Add a free **Groq** key at [console.groq.com](https://console.groq.com) as a permanent backup (`GROQ_API_KEY` in `.env`).",
     toolsUsed: [],
   };
 }

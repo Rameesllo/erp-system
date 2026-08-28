@@ -42,6 +42,7 @@ export async function POST(request: Request) {
       success: true,
       response: result.response,
       toolsUsed: result.toolsUsed,
+      action: result.action,
     });
   } catch (error: any) {
     console.error("AI Chat API Error:", error);
