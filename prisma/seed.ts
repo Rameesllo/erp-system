@@ -4,8 +4,8 @@ import bcrypt from "bcryptjs";
 async function main() {
   console.log("Checking and activating admin user...");
 
-  const adminEmail = "admin@nexuserp.com";
-  const hashedPassword = await bcrypt.hash("admin123", 10);
+  const adminEmail = "admin@gmail.com";
+  const hashedPassword = await bcrypt.hash("123456", 10);
 
   const admin = await prisma.user.upsert({
     where: { email: adminEmail },
